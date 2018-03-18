@@ -1,0 +1,212 @@
+---
+title: "Introduction to ConvNets with Keras and R"
+output: html_notebook
+---
+
+Load packages:
+
+```{r, message=FALSE}
+library(keras)
+library(tidyverse)
+library(jsonlite)
+library(abind)
+library(gridExtra)
+library(pracma)
+source('utils.R')
+```
+
+We will use a dataset of 2800 satellite pictures. Every row contains information about one photo (80-pixel height, 80-pixel width, 3 colors - RGB color space). To input data into a Keras model, we need to transform it into a 4-dimensional array (index of sample, height, width, colors). Every picture is associated with a label that could be equal 1 for a ship and 0 for non-ship object. Read the data:
+
+```{r}
+ships_json <- fromJSON("shipsnet.json")[1:2]
+names(ships_json)
+dim(ships_json$data)
+length(ships_json$labels)
+```
+
+TASK1: Transform the image into 4 dimensional array:
+
+```{r}
+sample_image <- ships_json$data[1,]
+```
+
+From `sample_image` select pixel values corresponding to RED, GREEN and BLUE channels and reshape them into matrices (dims = height X width)
+
+```{r}
+r <- matrix(sample_image[1:?], ?, ?, byrow = TRUE) / 255
+g <- matrix(sample_image[?:?], ?, ?, byrow = TRUE) / 255
+b <- matrix(sample_image[?:?], ?, ?, byrow = TRUE) / 255
+```
+
+Bind channels into 3-dimensional array:
+
+```{r}
+sample_image <- array(c(?, ?, ?), dim = c(?, ?, ?))
+```
+
+Plot `sample_image`:
+
+```{r}
+plot_sample_image(sample_image, show_layers = TRUE)
+```
+
+Sometimes it is usefull to do some geometric transformation (rotation, translation, thickening, blurring etc.) to enlarge training set on an image to create new one. For example, in `R` we can use `rot90` function from the `pracma` package to create images rotated by 90, 180, or 270 degrees. Rotate the images:
+
+```{r}
+sample_image_rot90 <- array(c(rot90(r, 1), ?, ?), dim = c(80, 80, 3))
+sample_image_rot180 <- array(?, ?, ?), dim = c(80, 80, 3))
+sample_image_rot270 <- array(?, ?, ?), dim = c(80, 80, 3))
+
+grid.arrange(plot_sample_image(sample_image),
+             plot_sample_image(sample_image_rot90),
+             plot_sample_image(sample_image_rot180),
+             plot_sample_image(sample_image_rot270),
+             ncol = 2, nrow = 2)
+```
+
+Finally, apply it to all images in the dataset:
+
+```{r}
+ships_data <- ships_json$data %>% apply(., 1, function(x) {
+  r <- matrix(x[1:6400], 80, 80, byrow = TRUE) / 255
+  g <- matrix(x[6401:12800], 80, 80, byrow = TRUE) / 255
+  b <- matrix(x[12801:19200], 80, 80, byrow = TRUE) / 255
+  list(array(c(r,g,b), dim = c(80, 80, 3)),
+       array(c(rot90(r, 1), rot90(g, 1), rot90(b, 1)), dim = c(80, 80, 3)),
+       array(c(rot90(r, 2), rot90(g, 2), rot90(b, 2)), dim = c(80, 80, 3)),
+       array(c(rot90(r, 3), rot90(g, 3), rot90(b, 3)), dim = c(80, 80, 3)))
+}) %>% do.call(c, .) %>% abind(., along = 4) %>% aperm(c(4, 1, 2, 3))
+ships_labels <- ships_json$labels %>% map(~ rep(.x, 4)) %>%
+  unlist() %>% to_categorical(2)
+dim(ships_data)
+dim(ships_labels)
+```
+
+Plot sample images:
+
+```{r}
+plot_sample_images(ships_data, ships_labels, seed = 226)
+```
+
+Split the data into training and test set:
+
+```{r}
+set.seed(1234)
+indexes <- sample(seq(1, 2800 * 4, 4), 0.7 * 2800) %>% map(~ .x + 0:3) %>% unlist()
+train <- list(data = ships_data[indexes,,,], labels = ships_labels[indexes,])
+test <- list(data = ships_data[-indexes,,,], labels = ships_labels[-indexes,])
+rm(ships_json, ships_data)
+```
+
+TASK2: Build CNN for image classification:
+
+Initialize `model1`:
+
+```{r}
+model1 <- keras_model_sequential()
+summary(model1)
+```
+
+Add first convolution layer to `model1`. Specify the input shape, nr of filters (32), kernel_size (3x3), strides (1x1) and activation function (relu). Note that objects in Keras are `modified in-place` so there’s no need for consecutive assignment:
+
+```{r}
+model1 %>%
+  layer_conv_2d(
+    input_shape = c(?, ?, ?),
+    filter = ?, kernel_size = c(?, ?), strides = c(?, ?),
+    activation = ?)
+summary(model1)
+```
+
+Add another layers to `model1`:
+1. Max pooling layer (layer_max_pooling_2d) with pool size 2x2 and strides 2x2,
+2. Convolution layer (layer_conv_2d) with 64 filters, kernel 3x3, strides 1x1, relu activation,
+3. Max pooling layer (layer_max_pooling_2d) with pool size 2x2 and strides 2x2,
+4. Flatten the resulting activation map (layer_flatten),
+5. Output layer giving the probabilities of a ship in an image (layer_dense). Use softmax activation.
+
+```{r}
+model1 %>%
+  ?
+summary(model1)
+```
+
+Configure `model1` for training:
+
+```{r}
+model1 %>% compile(
+  loss = "categorical_crossentropy",
+  optimizer = optimizer_sgd(lr = 0.0001, decay = 1e-6),
+  metrics = "accuracy"
+)
+```
+
+Fit `model1`:
+
+```{r error=FALSE, message=FALSE, warning=FALSE, include=FALSE, results='hide'}
+ships_fit1 <- model1 %>% fit(train[[1]], train[[2]], epochs = 20, batch_size = 32,
+                             validation_split = 0.2,
+                             callbacks = callback_tensorboard("logs/model1"))
+```
+
+Predict on test set:
+
+```{r}
+predicted_probs <- model1 %>%
+  predict_proba(test[[1]])
+
+head(predicted_probs)
+
+model1 %>% evaluate(test[[1]], test[[2]])
+```
+
+Save/load the model:
+
+```{r}
+save_model_hdf5(model1, "model1.hdf5")
+new_model <- load_model_hdf5("model1.hdf5")
+```
+
+TASK3: Build, train and fit your own model:
+I. Architecture:
+1. Start with 2d convolution (32 filters, 3x3 kernel, relu activation)
+2. Add another 2d convolution
+3. Add max pooling layer (2x2 pool size)
+4. Add dropout layer (rate 0.25)
+5. Add another 2d convolution (64 filters)
+6. Add another 2d convolution (64 filters)
+7. Add max pooling layer (2x2 pool size)
+8. Add dropout layer (rate 0.25)
+9. Add dense layer (512 units)
+II. Configure model for training:
+1. Instead of SGD, use ADAMAX optimizer
+III. Fit the model
+1. Use TensorBoard callback ( dir = "logs/model2")
+
+```{r, message=FALSE, warning=FALSE, include=FALSE, results='hide'}
+model2 <- ?
+model2 %>%
+  ?
+
+model2 %>% compile(
+  loss = "categorical_crossentropy",
+  optimizer = ?,
+  metrics = "accuracy"
+)
+
+ships_fit2 <- model2 %>% ?
+
+predicted_probs <- model2 %>%
+  predict_proba(test[[1]])
+
+head(predicted_probs)
+
+model2 %>% evaluate(test[[1]], test[[2]])
+```
+
+Compare models:
+
+```{r, message=FALSE, warning=FALSE, include=FALSE, results='hide'}
+tensorboard("logs")
+```
+
